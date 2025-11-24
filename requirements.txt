@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+transformers>=4.20.0
+torch
+symspellpy
+sentencepiece
+pycountry
+python-multipart
+requests
+python.exe -m pip install --upgrade pip
