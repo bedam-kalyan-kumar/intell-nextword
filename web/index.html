@@ -1,278 +1,338 @@
 <!doctype html>
 <html>
+
 <head>
-  <meta charset="utf-8"/>
+  <meta charset="utf-8" />
   <title>Next-Word & Next-Sentence — Voice + Typing</title>
+
   <style>
-    body { font-family: Arial, sans-serif; max-width:900px; margin:20px auto; }
-    textarea { width:100%; font-size:16px; padding:8px; box-sizing:border-box; }
-    .suggestions { display:flex; gap:20px; margin-top:10px; }
-    .box { flex:1; background:#f9f9f9; padding:10px; border-radius:6px; min-height:120px; }
-    .item { padding:6px 8px; margin:6px 0; background:white; border-radius:4px; cursor:pointer; }
-    .item:hover { background:#eef; }
-    .label { font-size:13px; color:#444; margin-bottom:6px; }
-    #status { font-size:13px; color:#666; margin-top:8px; }
-    button { padding:8px 12px; margin-top:8px; }
-    .controls { display:flex; gap:10px; align-items:center; margin-top:8px; }
-    .mic-on { background: #e53935; color: #fff; }
-    .mic-off { background: #4caf50; color: #fff; }
-    .small { font-size:12px; color:#666; margin-left:6px; }
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 900px;
+      margin: 20px auto;
+    }
+
+    textarea {
+      width: 100%;
+      font-size: 16px;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+
+    .suggestions {
+      display: flex;
+      gap: 20px;
+      margin-top: 10px;
+    }
+
+    .box {
+      flex: 1;
+      background: #f9f9f9;
+      padding: 10px;
+      border-radius: 6px;
+      min-height: 120px;
+    }
+
+    .item {
+      padding: 6px 8px;
+      margin: 6px 0;
+      background: white;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .item:hover {
+      background: #eef;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+    }
   </style>
 </head>
+
 <body>
   <h2>Next-Word & Next-Sentence Prediction — Voice + Typing</h2>
 
-  <label class="label">Type or speak (edit transcript before sending):</label>
-  <textarea id="input" rows="4" placeholder="Start typing or click Start Voice..."></textarea>
+  <textarea id="input" rows="4" placeholder="Type or speak..."></textarea>
 
   <div class="controls">
-    <button id="startBtn" class="mic-off">Start Voice</button>
-    <button id="stopBtn" class="mic-on" disabled>Stop</button>
+    <button id="startBtn">Start Voice</button>
+    <button id="stopBtn" disabled>Stop</button>
     <button id="predictBtn">Predict Now</button>
+    <button id="correctBtn">Test Correction</button>
 
-    <label style="margin-left:12px;"><input id="spellcheck" type="checkbox" checked> Apply spellcheck</label>
-    <label style="margin-left:12px;"><input id="sampling" type="checkbox"> Sampling (diverse)</label>
+    <label><input id="spellcheck" type="checkbox" checked> Spellcheck</label>
+    <label><input id="sampling" type="checkbox"> Sampling</label>
 
-    <label class="small" id="langSelectLabel" title="Recognition language">Lang:
-      <select id="recognitionLang" style="margin-left:6px;">
-        <option value="en-US" selected>English (en-US)</option>
-        <option value="hi-IN">Hindi (hi-IN)</option>
-        <option value="te-IN">Telugu (te-IN)</option>
-        <option value="en-IN">Hinglish (en-IN)</option>
+    <label>Lang:
+      <select id="recognitionLang">
+        <option value="en">English</option>
+        <option value="hi">Hindi</option>
+        <option value="te">Telugu</option>
+        <option value="ta">Tamil</option>
+        <option value="kn">Kannada</option>
+        <option value="fr">french</option>
       </select>
     </label>
   </div>
 
   <div id="status">Ready</div>
 
-  <div class="suggestions" aria-live="polite">
+  <div class="suggestions">
     <div class="box">
-      <div class="label"><strong>Next words</strong> (click to insert)</div>
+      <div class="label">Next words</div>
       <div id="wordBox">—</div>
     </div>
     <div class="box">
-      <div class="label"><strong>Next sentences</strong> (click to insert)</div>
+      <div class="label">Next sentences</div>
       <div id="sentBox">—</div>
     </div>
   </div>
 
-<script>
-/*
-  Voice + Typing frontend:
-  - Uses Web Speech API (SpeechRecognition) for STT when available.
-  - Debounces typing (300ms) and queries /predict for word and sentence suggestions.
-  - Click suggestion to append at end (kept simple). Focus returns to textarea.
-  - If browser lacks SpeechRecognition, Start Voice will be disabled and an info shown.
-*/
+  <script>
+    /* ==========================================================
+       CORE ELEMENTS
+    =========================================================== */
+    const inputEl = document.getElementById("input");
+    const correctBtn = document.getElementById("correctBtn");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const predictBtn = document.getElementById("predictBtn");
+    const recognitionLangEl = document.getElementById("recognitionLang");
+    const spellcheckEl = document.getElementById("spellcheck");
+    const statusEl = document.getElementById("status");
+    const wordBox = document.getElementById("wordBox");
+    const sentBox = document.getElementById("sentBox");
 
-const inputEl = document.getElementById("input");
-const wordBox = document.getElementById("wordBox");
-const sentBox = document.getElementById("sentBox");
-const statusEl = document.getElementById("status");
-const startBtn = document.getElementById("startBtn");
-const stopBtn = document.getElementById("stopBtn");
-const predictBtn = document.getElementById("predictBtn");
-const spellcheckEl = document.getElementById("spellcheck");
-const samplingEl = document.getElementById("sampling");
-const recognitionLangEl = document.getElementById("recognitionLang");
+    let debounceTimer = null;
+    let lastQuery = "";
+    let correctedCache = new Map();
+    let lastFinal = "";
 
-let recognition = null;
-let recognizing = false;
-let debounceTimer = null;
-const DEBOUNCE_MS = 300;
-let lastQuery = "";
+    /* ==========================================================
+       SPEECH RECOGNITION (NO DUPLICATES)
+    =========================================================== */
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+    if (!SpeechRecognition) {
+      statusEl.textContent = "Voice not supported in this browser. Use Chrome/Edge. You can still type.";
+      startBtn.disabled = true;
+      stopBtn.disabled = true;
+    } else {
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = recognitionLangEl.value || 'en-US';
 
-// Feature detection for Web Speech API
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
-if (!SpeechRecognition) {
-  statusEl.textContent = "Voice not supported in this browser. Use Chrome/Edge. You can still type.";
-  startBtn.disabled = true;
-  stopBtn.disabled = true;
-} else {
-  recognition = new SpeechRecognition();
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.lang = recognitionLangEl.value || 'en-US';
+      recognition.onstart = () => {
+        recognizing = true;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        statusEl.textContent = "Listening... speak now";
+      };
 
-  recognition.onstart = () => {
-    recognizing = true;
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-    statusEl.textContent = "Listening... speak now";
-  };
+      recognition.onerror = (event) => {
+        console.error("SpeechRecognition error:", event);
+        statusEl.textContent = "Speech recognition error: " + (event.error || "unknown");
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          try { recognition.stop(); } catch (e) {/*ignore*/ }
+        }
+      };
 
-  recognition.onerror = (event) => {
-    console.error("SpeechRecognition error:", event);
-    statusEl.textContent = "Speech recognition error: " + (event.error || "unknown");
-    // if fatal error, stop recognition
-    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      recognition.stop();
+      recognition.onend = () => {
+        recognizing = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        statusEl.textContent = "Stopped listening.";
+      };
+
+      // Build final + interim transcripts; only append the delta of final transcript
+      recognition.onresult = (event) => {
+        let finalTranscript = "";
+        let interimTranscript = "";
+
+        // Merge results into full final and interim strings
+        for (let i = 0; i < event.results.length; ++i) {
+          const res = event.results[i];
+          const text = res[0].transcript;
+          if (res.isFinal) {
+            finalTranscript += (finalTranscript ? " " : "") + text;
+          } else {
+            interimTranscript += (interimTranscript ? " " : "") + text;
+          }
+        }
+
+        finalTranscript = finalTranscript.trim();
+        interimTranscript = interimTranscript.trim();
+
+        // If there's new final text beyond lastFinal, append only the delta
+        if (finalTranscript && finalTranscript !== lastFinal) {
+          let newPart = finalTranscript;
+          if (lastFinal && finalTranscript.startsWith(lastFinal)) {
+            newPart = finalTranscript.slice(lastFinal.length).trim();
+          }
+
+          if (newPart) {
+            let cur = inputEl.value || "";
+            // avoid doubling if current ends with lastFinal
+            if (lastFinal && cur.endsWith(lastFinal)) {
+              cur = cur.slice(0, cur.length - lastFinal.length).trim();
+            }
+            if (cur.length && !cur.endsWith(" ")) cur += " ";
+            cur += newPart;
+            inputEl.value = cur.trim();
+            // update canonical final
+            lastFinal = finalTranscript;
+          } else {
+            lastFinal = finalTranscript;
+          }
+        }
+
+        // Show interim appended to committed text (not saved into lastFinal)
+        if (interimTranscript) {
+          let base = inputEl.value || "";
+          if (base.length && !base.endsWith(" ")) base += " ";
+          inputEl.value = (base + interimTranscript).trim();
+        } else {
+          // if no interim, make sure textarea equals lastFinal (committed)
+          if (lastFinal) {
+            inputEl.value = lastFinal;
+          }
+        }
+
+        // Debounced suggestion fetch
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(requestSuggestions, DEBOUNCE_MS);
+      };
+
+      // change recognition language when select changes
+      recognitionLangEl.addEventListener("change", () => {
+        const val = recognitionLangEl.value;
+        recognition.lang = val;
+        statusEl.textContent = "Recognition language: " + val;
+      });
+
+      startBtn.addEventListener("click", () => {
+        try {
+          recognition.lang = recognitionLangEl.value || recognition.lang;
+          // use current textarea content as already committed text
+          lastFinal = (inputEl.value || "").trim();
+          recognition.start();
+        } catch (e) {
+          console.warn("recognition.start() error", e);
+          statusEl.textContent = "Unable to start voice recording: " + (e.message || e);
+        }
+      });
+
+      stopBtn.addEventListener("click", () => {
+        try { recognition.stop(); } catch (e) { console.warn(e); }
+      });
     }
-  };
+    // Add this to your script
 
-  recognition.onend = () => {
-    recognizing = false;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    statusEl.textContent = "Stopped listening.";
-  };
+    /* ==========================================================
+       AUTOCORRECT SYSTEM (PERFECT VERSION)
+    =========================================================== */
+    function replaceRange(start, end, replacement) {
+      const cur = inputEl.value;
+      inputEl.value = cur.slice(0, start) + replacement + cur.slice(end);
+    }
 
-  recognition.onresult = (event) => {
-    // Build transcript from results (final + interim)
-    let interim = "";
-    let final = inputEl.value || "";
-    for (let i = event.resultIndex; i < event.results.length; ++i) {
-      const seg = event.results[i];
-      if (seg.isFinal) {
-        final = (final + " " + seg[0].transcript).trim();
-      } else {
-        interim += seg[0].transcript;
+    async function autocorrectLastWord() {
+      let txt = inputEl.value.trim();
+      if (!txt) return;
+
+      const parts = txt.split(/\s+/);
+      const last = parts[parts.length - 1];
+      if (!last || last.length < 2) return;
+
+      const key = last.toLowerCase();
+      const lang = recognitionLangEl.value;
+
+      if (correctedCache.has(key)) {
+        const corrected = correctedCache.get(key);
+        if (corrected !== last) applyCorrection(last, corrected);
+        return;
       }
+
+      const res = await fetch(`/correct_word?text=${encodeURIComponent(last)}&lang=${lang}`);
+      const data = await res.json();
+      const corrected = data.corrected;
+
+      correctedCache.set(key, corrected);
+
+      if (corrected.toLowerCase() !== key) applyCorrection(last, corrected);
     }
-    inputEl.value = final + (interim ? " " + interim : "");
-    // Debounce a suggestion request while the user speaks
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(requestSuggestions, DEBOUNCE_MS);
-  };
 
-  // Wire up language select: change recognition.lang dynamically
-  recognitionLangEl.addEventListener("change", () => {
-    const val = recognitionLangEl.value;
-    recognition.lang = val;
-    statusEl.textContent = "Recognition language: " + val;
-  });
-
-  startBtn.addEventListener("click", () => {
-    try {
-      // update recognition.lang in case user changed select
-      recognition.lang = recognitionLangEl.value || recognition.lang;
-      recognition.start();
-    } catch (e) {
-      console.warn("recognition.start() error", e);
-      statusEl.textContent = "Unable to start voice recording: " + (e.message || e);
+    function applyCorrection(oldWord, newWord) {
+      const cur = inputEl.value;
+      const start = cur.lastIndexOf(oldWord);
+      const end = start + oldWord.length;
+      replaceRange(start, end, newWord);
     }
-  });
 
-  stopBtn.addEventListener("click", () => {
-    try { recognition.stop(); } catch(e){ console.warn(e); }
-  });
-}
+    /* TRIGGER AUTOCORRECT ON SPACE */
+    inputEl.addEventListener("keyup", (e) => {
+      if (e.key === " ") setTimeout(autocorrectLastWord, 5);
+    });
 
-// Helper: render suggestions list
-function renderList(container, items, kind) {
-  container.innerHTML = "";
-  if (!items || items.length === 0) {
-    container.innerText = "—";
-    return;
-  }
-  items.forEach(it => {
-    const div = document.createElement("div");
-    div.className = "item";
-    div.innerText = it;
-    div.addEventListener("click", () => insertSuggestion(it, kind));
-    container.appendChild(div);
-  });
-}
+    /* BUTTON AUTOCORRECT */
+    correctBtn.onclick = autocorrectLastWord;
 
-// Insert suggestion at end (keeps API simple). If you want caret insertion, request that separately.
-function insertSuggestion(text, kind) {
-  let cur = inputEl.value || "";
-  if (kind === "word") {
-    if (cur.length && !cur.endsWith(" ")) cur += " ";
-    cur += text;
-    if (!cur.endsWith(" ")) cur += " ";
-  } else {
-    if (cur.length && !cur.endsWith(" ")) cur += " ";
-    cur += text.trim();
-    if (!cur.endsWith(" ")) cur += " ";
-  }
-  inputEl.value = cur;
-  // Immediately fetch updated suggestions
-  requestSuggestions();
-  inputEl.focus();
-}
-
-// Query backend /predict
-async function fetchPredict(text) {
-  const lang = document.getElementById("recognitionLang").value || "en";
-  const params = new URLSearchParams({
-    text: text,
-    lang: lang,
-    apply_spellcheck: spellcheckEl.checked ? "true" : "false",
-    word_max_tokens: 3,
-    sentence_max_tokens: 30,
-    num_word: 3,
-    num_sentence: 3,
-    do_sample: samplingEl.checked ? "true" : "false"
-  });
-  const url = "/predict?" + params.toString();
-  statusEl.textContent = "Requesting suggestions...";
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      const txt = await res.text();
-      statusEl.textContent = "Server error: " + res.status + " " + txt;
-      return null;
+    /* ==========================================================
+       SUGGESTIONS
+    =========================================================== */
+    function scheduleSuggestions() {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(requestSuggestions, 300);
     }
-    const data = await res.json();
-    statusEl.textContent = "Suggestions updated";
-    return data;
-  } catch (err) {
-    statusEl.textContent = "Network error: " + (err.message || err);
-    return null;
-  }
-}
 
-// Debounced request
-async function requestSuggestions() {
-  const text = inputEl.value.trim();
-  if (!text) {
-    renderList(wordBox, [], "word");
-    renderList(sentBox, [], "sentence");
-    statusEl.textContent = "Type or speak to get suggestions";
-    lastQuery = "";
-    return;
-  }
-  if (text === lastQuery) return;
-  lastQuery = text;
-  const data = await fetchPredict(text);
-  if (!data) return;
-  // If API returns word_candidates & sentence_candidates use them, else fallback to generic candidates field
-  const words = data.word_candidates || data.candidates || [];
-  const sents = data.sentence_candidates || [];
-  renderList(wordBox, words, "word");
-  renderList(sentBox, sents, "sentence");
-}
+    async function fetchPredict(text) {
+      const lang = recognitionLangEl.value;
 
-// Bindings
-inputEl.addEventListener("input", () => {
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(requestSuggestions, DEBOUNCE_MS);
-});
+      const params = new URLSearchParams({
+        text: text,
+        lang: lang,
+        apply_spellcheck: spellcheckEl.checked,
+        num_word: 3,
+        num_sentence: 3
+      });
 
-predictBtn.addEventListener("click", requestSuggestions);
-
-// Keyboard shortcuts
-// - Tab inserts first word suggestion
-// - Ctrl+Enter inserts first sentence suggestion
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Tab") {
-    const first = wordBox.querySelector(".item");
-    if (first) {
-      e.preventDefault();
-      insertSuggestion(first.innerText, "word");
+      const res = await fetch("/predict?" + params.toString());
+      return res.json();
     }
-  } else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-    const first = sentBox.querySelector(".item");
-    if (first) {
-      e.preventDefault();
-      insertSuggestion(first.innerText, "sentence");
-    }
-  }
-});
 
-// initial state
-statusEl.textContent = "Ready. Type or click Start Voice (Chrome/Edge).";
-</script>
+    async function requestSuggestions() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+
+      const data = await fetchPredict(text);
+      renderList(wordBox, data.word_candidates);
+      renderList(sentBox, data.sentence_candidates);
+    }
+
+    function renderList(box, arr) {
+      box.innerHTML = "";
+      arr.forEach((t) => {
+        const div = document.createElement("div");
+        div.className = "item";
+        div.textContent = t;
+        div.onclick = () => insertSuggestion(t);
+        box.appendChild(div);
+      });
+    }
+
+    function insertSuggestion(text) {
+      inputEl.value += " " + text + " ";
+      requestSuggestions();
+    }
+
+    inputEl.addEventListener("input", scheduleSuggestions);
+    predictBtn.onclick = requestSuggestions;
+
+  </script>
 </body>
+
 </html>
