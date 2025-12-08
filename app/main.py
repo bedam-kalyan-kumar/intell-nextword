@@ -9,8 +9,8 @@ from app.spellchecker import SpellChecker
 from app.utils import top_k_unique
 import re
 from collections import OrderedDict
-
-
+import os
+from symspellpy import SymSpell, Verbosity
 app = FastAPI(title="Intell Next-Word & Next-Sentence API (Lang-aware)")
 app.mount("/static", StaticFiles(directory="web"), name="static")
 
@@ -37,7 +37,8 @@ def predict(
     sentence_max_tokens: int = Query(100),
     num_word: int = Query(3),
     num_sentence: int = Query(3),
-    do_sample: bool = Query(False)
+    do_sample: bool = Query(True)
+
 ):
     original = text
     # normalize lang to basic code
@@ -52,19 +53,15 @@ def predict(
     # ----------------------------
     # Note: GPT-2 Large / your model implementation expects no 'lang' parameter.
     # We pass sampling options via do_sample; model.predict_next may also accept temperature/top_k/top_p.
-    word_gen = model_manager.predict_next(
-        corrected,
-        max_new_tokens=word_max_tokens,
-        do_sample=do_sample,
-        num_return_sequences=num_word
-    )
+    word_gen, sentence_gen = model_manager.predict_both(
+    corrected,
+    num_words=num_word,
+    num_sentences=num_sentence
+)
 
-    sentence_gen = model_manager.predict_next(
-        corrected,
-        max_new_tokens=sentence_max_tokens,
-        do_sample=do_sample,
-        num_return_sequences=num_sentence
-    )
+
+
+
 
     # ----------------------------
     # Post-processing / cleaning
@@ -153,10 +150,72 @@ def predict(
     # As a final safety, ensure uniqueness and reasonable trimming (optional)
     word_candidates = top_k_unique([w.strip() for w in word_candidates], k=num_word)
     sentence_candidates = top_k_unique([s.strip() for s in sentence_candidates], k=num_sentence)
-
+    
     return {
         "original": original,
         "corrected": corrected,
         "word_candidates": word_candidates,
         "sentence_candidates": sentence_candidates
     }
+@app.get("/correct_word")
+def correct_word(text: str, lang: str = "en"):
+    corrected = spell.correct_text(text, lang=lang)
+    return {"corrected": corrected}
+@app.get("/debug_load")
+def debug_load(lang: str):
+    sym = spell._load_symspell_for_lang(lang)
+    return {"lang": lang, "loaded": sym is not None}
+@app.get("/debug_read_file")
+def debug_read_file(lang: str):
+    path = spell._freq_path_for_lang(lang)
+    return {
+        "exists": os.path.exists(path),
+        "size": os.path.getsize(path) if os.path.exists(path) else 0,
+        "first_line": open(path, "r", encoding="utf-8").readline()
+    }
+@app.get("/debug_validate_dictionary")
+def debug_validate_dictionary(lang: str):
+    path = spell._freq_path_for_lang(lang)
+    errors = []
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            line = line.rstrip("\n")
+            if "\t" not in line:
+                errors.append(f"Line {i}: missing TAB → {repr(line)}")
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2:
+                errors.append(f"Line {i}: too many columns → {repr(line)}")
+                continue
+            word, freq = parts
+            if not freq.isdigit():
+                errors.append(f"Line {i}: non-numeric freq '{freq}' → {repr(line)}")
+    return {"errors": errors}
+@app.get("/debug_te_line_codes")
+def debug_te_line_codes(lang: str = "te"):
+    path = spell._freq_path_for_lang(lang)
+    out = []
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            word, num = line.split("\t")
+            out.append(f"Line {i} freq chars: {[hex(ord(c)) for c in num.strip()]}")
+    return out
+@app.get("/debug_te_preview")
+def debug_te_preview():
+    path = spell._freq_path_for_lang("te")
+    with open(path, "rb") as f:
+        raw = f.read(200)
+    return {"preview": raw.decode("utf-8", errors="replace")}
+@app.get("/debug_te_count")
+def debug_te_count():
+    path = spell._freq_path_for_lang("te")
+    sym = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+    ok = sym.load_dictionary(path, term_index=0, count_index=1)
+    return {
+        "ok": ok,
+        "total_words": sym.words_count,
+        "dictionary_size": os.path.getsize(path)
+    }
+
