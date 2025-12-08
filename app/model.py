@@ -1,74 +1,114 @@
 # app/model.py
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
 
-# -------------------------------------------------------
-# USE GPT-2 LARGE
-# -------------------------------------------------------
-MODEL_NAME = "gpt2-large"
+import os
+from groq import Groq
+from dotenv import load_dotenv
 
-class NextWordModel:
-    def __init__(self, model_name=MODEL_NAME, device=None):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model_name = model_name
-        print(f"Loading GPT-2 Large: {self.model_name} on {self.device}")
+load_dotenv()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+class GroqModelManager:
+    def __init__(self):
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("Missing GROQ_API_KEY in .env")
 
-        self.model = AutoModelForCausalLM.from_pretrained(self.model_name).to(self.device)
-        self.model.eval()
+        self.client = Groq(api_key=api_key)
+        self.model_name = "llama-3.1-8b-instant"
 
-    def predict_next(
-        self,
-        text,
-        max_new_tokens=40,
-        do_sample=True,
-        num_return_sequences=3,
-        temperature=0.8,
-        top_k=50,
-        top_p=0.9,
-    ):
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+    def predict_both(self, text, num_words=3, num_sentences=3):
+        """
+        One SINGLE API call that returns BOTH:
+         - next words
+         - next sentences
+        """
 
-        gen_kwargs = {
-            "max_new_tokens": max_new_tokens,
-            "do_sample": do_sample,
-            "num_return_sequences": num_return_sequences,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-        }
+        prompt = f"""
+You are a predictive text model.
+Given input text below, generate BOTH:
 
-        # If sampling disabled BUT multiple sequences requested → use beams
-        if not do_sample and num_return_sequences > 1:
-            gen_kwargs["num_beams"] = max(2, num_return_sequences)
+1) {num_words} likely next single words
+2) {num_sentences} possible next sentences
 
-        outputs = self.model.generate(**inputs, **gen_kwargs)
+Rules:
+- Do NOT repeat the input text.
+- Do NOT produce duplicate items.
+- Output strictly in JSON object like this:
+{{
+  "words": [...],
+  "sentences": [...]
+}}
 
-        results = []
-        prompt_len = len(text)
-        for out in outputs:
-            decoded = self.tokenizer.decode(out, skip_special_tokens=True)
-            continuation = decoded[prompt_len:].strip() if decoded.startswith(text) else decoded.strip()
-            results.append(continuation)
+Input text: "{text}"
+"""
 
-        return results
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0.8,
+                top_p=0.9,
+            )
+        except Exception as e:
+            print("Model request failed:", e)
+            return [], []
 
+        import json, re
+        # attempt to extract text content from response safely
+        try:
+            content = resp.choices[0].message.content
+        except Exception:
+            try:
+                # older SDK shapes
+                content = getattr(resp.choices[0], 'text', '')
+            except Exception:
+                content = ""
 
-# ------------------------------
-# Singleton + Compatibility Alias
-# ------------------------------
-_model_instance = None
+        if not content:
+            return [], []
 
-def get_model():
-    global _model_instance
-    if _model_instance is None:
-        _model_instance = NextWordModel()
-    return _model_instance
+        # Some models include backticks or explanation; try to find a JSON object inside
+        try:
+            # find the first '{' and last '}' and parse between them
+            m = re.search(r"\{.*\}", content, flags=re.S)
+            if m:
+                blob = m.group(0)
+            else:
+                # fallback: try to parse the whole content
+                blob = content
+            data = json.loads(blob)
+            words = data.get("words") or data.get("word") or []
+            sentences = data.get("sentences") or data.get("sentence") or []
+            # ensure lists
+            if not isinstance(words, list):
+                words = [str(words)]
+            if not isinstance(sentences, list):
+                sentences = [str(sentences)]
+            return words, sentences
+        except Exception as e:
+            print("Failed to parse model output as JSON; returning empty lists. Error:", e)
+            # as last resort try to split content into lines and return top tokens
+            try:
+                lines = [l.strip() for l in content.splitlines() if l.strip()]
+                # guess words from first line tokens
+                words = []
+                sentences = []
+                if lines:
+                    # take first line tokens as words
+                    first = lines[0]
+                    words = [t for t in re.split(r"\s+|,", first) if t][:num_words]
+                    # take next non-empty lines as sentences
+                    for ln in lines[1:1+num_sentences]:
+                        sentences.append(ln)
+                return words, sentences
+            except Exception:
+                return [], []
+        
 
-def get_model_manager():  # Compatibility for your old code
-    return get_model()
+_model_manager = None
+
+def get_model_manager():
+    global _model_manager
+    if _model_manager is None:
+        _model_manager = GroqModelManager()
+    return _model_manager
